@@ -1,5 +1,6 @@
 """
 src/models.py — Data classes and configuration
+MCTAP本家 (src/models.py) の構造に準拠。
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -45,6 +46,23 @@ class LocalModel:
     model_path: str
     temperature: float = 0.0
     max_tokens: int = 512
+
+
+@dataclass
+class Attempt:
+    """本家 Attempt に準拠。ノードの1試行を記録する。"""
+    attacker_prompt: str
+    score: int
+    feedback_from_previous_attempt: str = ""
+    vuln_category: Optional[str] = None
+
+
+@dataclass
+class TreeNode:
+    """本家 TreeNode に準拠。history を各ノードが独立して保持する。"""
+    children: List["TreeNode"] = field(default_factory=list)
+    history: List[Attempt] = field(default_factory=list)
+    on_topic: bool = True
 
 
 @dataclass
