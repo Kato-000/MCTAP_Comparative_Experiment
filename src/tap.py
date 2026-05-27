@@ -38,21 +38,36 @@ from src.judge import judge_response, check_on_topic
 # TAP_Baseline — 論文公式準拠
 # ─────────────────────────────────────────────────────────────────────────────
 
+_MAX_N_ATTACK_ATTEMPTS = 5  # 公式準拠
+
 def _get_attack(attacker_cfg: Model, convs: List[List[dict]], processed_responses: List[str]) -> List[Optional[dict]]:
     """
     公式 attack_llm.get_attack() に相当。
-    各会話に processed_response を追加してattackerを呼び出し、
-    {"improvement": ..., "prompt": ...} のdictリストを返す。
+    max_n_attack_attempts 回まで再試行してJSON生成を保証する。
     """
-    results = []
+    n = len(convs)
+    valid_outputs: List[Optional[dict]] = [None] * n
+    indices_to_regenerate = list(range(n))
+
+    # user メッセージを先に追加（1回だけ）
     for conv, response in zip(convs, processed_responses):
-        # 会話にユーザーメッセージを追加
-        conv_with_msg = conv + [{"role": "user", "content": response}]
-        raw = chat_completion(attacker_cfg, conv_with_msg, max_tokens=500)
-        # JSON パース
-        attack = _parse_attack_json(raw)
-        results.append(attack)
-    return results
+        conv.append({"role": "user", "content": response})
+
+    for attempt in range(_MAX_N_ATTACK_ATTEMPTS):
+        for idx in indices_to_regenerate[:]:
+            raw = chat_completion(attacker_cfg, convs[idx], max_tokens=500)
+            attack = _parse_attack_json(raw)
+            if attack is not None:
+                valid_outputs[idx] = attack
+                # attacker の返答を assistant として追記
+                convs[idx].append({"role": "assistant", "content": raw})
+                indices_to_regenerate.remove(idx)
+            # 失敗時は assistant メッセージを追加しない（次の試行で再生成）
+
+        if not indices_to_regenerate:
+            break
+
+    return valid_outputs
 
 
 def _parse_attack_json(raw: str) -> Optional[dict]:
@@ -97,9 +112,9 @@ def _prune(
     def get_first_k(lst):
         w = min(width, len(lst))
         truncated = [lst[shuffled[i][1]] for i in range(w) if shuffled[i][0] > 0]
+        # 公式準拠: 最低2件保証（score=0でも最上位2件を残す）
         if len(truncated) == 0:
-            # 最低1件は残す（公式準拠）
-            truncated = [lst[shuffled[0][1]]]
+            truncated = [lst[shuffled[0][1]], lst[shuffled[1][1]]] if len(lst) >= 2 else [lst[shuffled[0][1]]]
         return truncated
 
     if judge_scores is not None:
@@ -162,17 +177,11 @@ def run_tap_baseline(
         for _ in range(branching_factor):
             convs_copy = copy.deepcopy(convs_list)
             attacks = _get_attack(attacker, convs_copy, processed_response_list)
-            query_count += n_streams
-            # attackerの返答を会話履歴に追加
-            for conv, atk in zip(convs_copy, attacks):
-                if atk is not None:
-                    # user（init/feedback）→ assistant（attack）の順で追加済みの想定
-                    # 実際には get_attack 内で conv に追加する
-                    pass
+            query_count += len(convs_copy)
             extracted_attack_list.extend(attacks)
             convs_list_new.extend(convs_copy)
 
-        # None を除去
+        # None を除去（conv も同期して除去）
         tmp = [(a, c) for a, c in zip(extracted_attack_list, convs_list_new) if a is not None]
         if not tmp:
             break
@@ -207,7 +216,7 @@ def run_tap_baseline(
         # ── JUDGE ──
         judge_scores = []
         for prompt, resp in zip(adv_prompt_list, target_response_list):
-            score = judge_response(evaluator, goal, target_str, resp)
+            score = judge_response(evaluator, goal, target_str, prompt, resp)
             judge_scores.append(score)
             query_count += 1
             if score > best_score:
@@ -237,12 +246,11 @@ def run_tap_baseline(
 
         # 会話履歴をトランケート（keep_last_n）
         for conv in convs_list:
-            # system prompt を保持しつつ直近 keep_last_n*2 ターンのみ残す
             system_msgs = [m for m in conv if m["role"] == "system"]
             other_msgs  = [m for m in conv if m["role"] != "system"]
             conv[:] = system_msgs + other_msgs[-(keep_last_n * 2):]
 
-        # フィードバック生成
+        # フィードバック生成（prune後の convs_list と同じサイズに揃える）
         processed_response_list = [
             process_target_response(resp, score, goal, target_str)
             for resp, score in zip(target_response_list, judge_scores)

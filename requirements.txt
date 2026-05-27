@@ -1,12 +1,18 @@
-# LLM / API
-openai>=1.0.0
-anthropic>=0.25.0
-huggingface_hub>=0.22.0
+# =====================================================
+# MCTAP Comparative Experiment — 依存パッケージ
+# =====================================================
+# インストール:
+#   pip install -r requirements.txt
 
-# Data / ML
-torch>=2.1.0
-pydantic>=2.0.0
+# LLM API クライアント
+openai>=1.0.0          # LM Studio / OpenAI 互換エンドポイント
+anthropic>=0.25.0      # Anthropic Claude API（ターゲットにClaudeを使う場合）
 
-# Utilities
-loguru>=0.7.0
-tqdm>=4.66.0
+# 数値計算（TAP の prune でシャッフルに使用）
+numpy>=1.24.0
+
+# ログ
+loguru>=0.7.2
+
+# データセット読み込み（MCTAP本家と同じ形式で読む場合）
+# datasets>=2.0.0  # goals.jsonl を直接読む場合は不要（utils.py で対応済み）

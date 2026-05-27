@@ -24,14 +24,25 @@ from src.prompts import (
 from src.judge import judge_response
 
 
+_MAX_N_ATTACK_ATTEMPTS = 5  # 公式準拠
+
 def _get_attack(attacker_cfg: Model, conv: List[dict], processed_response: str) -> Optional[dict]:
     """
-    1ストリーム分のattackを生成。
-    conv にユーザーメッセージを追加してattackerを呼び出す。
+    1ストリーム分のattackを生成。max_n_attack_attempts 回まで再試行。
+    conv にユーザーメッセージを追加してattackerを呼び出し、
+    成功時のみ attackerの返答をassistantとして conv に追記する。
     """
-    conv_with_msg = conv + [{"role": "user", "content": processed_response}]
-    raw = chat_completion(attacker_cfg, conv_with_msg, max_tokens=500)
-    return _parse_attack_json(raw)
+    conv.append({"role": "user", "content": processed_response})
+
+    for attempt in range(_MAX_N_ATTACK_ATTEMPTS):
+        raw = chat_completion(attacker_cfg, conv, max_tokens=500)
+        attack = _parse_attack_json(raw)
+        if attack is not None:
+            conv.append({"role": "assistant", "content": raw})
+            return attack
+
+    logger.warning(f"[PAIR] Failed to generate valid attack after {_MAX_N_ATTACK_ATTEMPTS} attempts")
+    return None
 
 
 def _parse_attack_json(raw: str) -> Optional[dict]:
@@ -95,13 +106,17 @@ def run_pair(
             new_attacks.append(attack)
             query_count += 1
 
-        # None 除去
-        valid = [(a, c) for a, c in zip(new_attacks, convs_list) if a is not None]
+        # None 除去（conv・processed_response も同期）
+        valid = [
+            (a, c, p)
+            for a, c, p in zip(new_attacks, convs_list, processed_response_list)
+            if a is not None
+        ]
         if not valid:
             break
-        new_attacks, convs_list = zip(*valid)
-        new_attacks = list(new_attacks)
-        convs_list  = [copy.deepcopy(c) for c in convs_list]
+        new_attacks, convs_list, processed_response_list = zip(*valid)
+        new_attacks   = list(new_attacks)
+        convs_list    = [copy.deepcopy(c) for c in convs_list]
 
         adv_prompt_list = [a["prompt"] for a in new_attacks]
         improv_list     = [a["improvement"] for a in new_attacks]
@@ -116,7 +131,7 @@ def run_pair(
         # ── Judge スコアリング ──
         judge_scores = []
         for prompt, resp in zip(adv_prompt_list, target_response_list):
-            score = judge_response(attacker, goal, target_str, resp)
+            score = judge_response(attacker, goal, target_str, prompt, resp)
             judge_scores.append(score)
             query_count += 1
             if score > best_score:
