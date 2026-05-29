@@ -1,6 +1,9 @@
 """
 src/llm_client.py — Unified LLM API client
 Supports: LM Studio (OpenAI-compatible), Anthropic, HuggingFace
+
+モデルロード失敗（LM Studio が一時的にアンロードした場合）に対して
+長めの待機時間でリトライする。
 """
 from __future__ import annotations
 import os
@@ -11,6 +14,23 @@ import openai
 from loguru import logger
 
 from src.models import Model, AnthropicModel, HFModel
+
+# モデルロード失敗と判定するキーワード
+_MODEL_LOAD_ERROR_KEYWORDS = [
+    "failed to load model",
+    "error loading model",
+    "model is unloaded",
+    "model not found",
+]
+
+_MAX_RETRIES         = 10   # 最大リトライ回数
+_MODEL_LOAD_WAIT_SEC = 60   # モデルロードエラー時の待機時間（秒）
+_BASE_WAIT_SEC       = 2    # 通常エラー時のベース待機時間
+
+
+def _is_model_load_error(e: Exception) -> bool:
+    msg = str(e).lower()
+    return any(kw in msg for kw in _MODEL_LOAD_ERROR_KEYWORDS)
 
 
 def _make_openai_client(model: Model) -> openai.OpenAI:
@@ -27,13 +47,12 @@ def chat_completion(
 ) -> str:
     """
     Send a chat completion request and return the assistant's text.
-    Handles retries with exponential backoff.
+    モデルロードエラー時は長めに待機してリトライする。
     """
-    for attempt in range(5):
+    for attempt in range(_MAX_RETRIES):
         try:
             if isinstance(model_cfg, Model):
                 client = _make_openai_client(model_cfg)
-                # Strip the "openai/" prefix that LM Studio doesn't need
                 model_name = model_cfg.model_name
                 if model_name.startswith("openai/"):
                     model_name = model_name[len("openai/"):]
@@ -50,7 +69,6 @@ def chat_completion(
                 client = anthropic.Anthropic(
                     api_key=model_cfg.api_key or os.getenv("ANTHROPIC_API_KEY", "")
                 )
-                # Separate system message if present
                 system = ""
                 filtered = []
                 for m in messages:
@@ -83,23 +101,41 @@ def chat_completion(
                 return resp.choices[0].message.content or ""
 
         except Exception as e:
-            wait = 2 ** attempt
-            logger.warning(f"LLM call failed (attempt {attempt+1}/5): {e}. Retrying in {wait}s.")
-            time.sleep(wait)
+            if _is_model_load_error(e):
+                # モデルロードエラー: LM Studio がロード中のため長めに待機
+                logger.warning(
+                    f"[LLM] Model load error (attempt {attempt+1}/{_MAX_RETRIES}): {e}. "
+                    f"Waiting {_MODEL_LOAD_WAIT_SEC}s for model to load..."
+                )
+                time.sleep(_MODEL_LOAD_WAIT_SEC)
+            else:
+                # 通常エラー: 指数バックオフ
+                wait = _BASE_WAIT_SEC ** attempt
+                logger.warning(
+                    f"[LLM] Call failed (attempt {attempt+1}/{_MAX_RETRIES}): {e}. "
+                    f"Retrying in {wait}s."
+                )
+                time.sleep(wait)
 
-    logger.error("All LLM call attempts failed.")
+    logger.error("[LLM] All attempts failed. Returning error string.")
     return "[ERROR: LLM call failed]"
 
 
 def get_embedding(model_cfg: Model, text: str) -> List[float]:
     """Get text embedding vector."""
-    try:
-        client = _make_openai_client(model_cfg)
-        model_name = model_cfg.model_name
-        if model_name.startswith("openai/"):
-            model_name = model_name[len("openai/"):]
-        resp = client.embeddings.create(model=model_name, input=[text])
-        return resp.data[0].embedding
-    except Exception as e:
-        logger.warning(f"Embedding call failed: {e}")
-        return []
+    for attempt in range(5):
+        try:
+            client = _make_openai_client(model_cfg)
+            model_name = model_cfg.model_name
+            if model_name.startswith("openai/"):
+                model_name = model_name[len("openai/"):]
+            resp = client.embeddings.create(model=model_name, input=[text])
+            return resp.data[0].embedding
+        except Exception as e:
+            if _is_model_load_error(e):
+                logger.warning(f"[Embedding] Model load error. Waiting {_MODEL_LOAD_WAIT_SEC}s...")
+                time.sleep(_MODEL_LOAD_WAIT_SEC)
+            else:
+                logger.warning(f"[Embedding] Call failed: {e}")
+                return []
+    return []

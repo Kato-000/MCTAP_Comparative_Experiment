@@ -161,9 +161,11 @@ def main() -> None:
                 )
 
             except Exception as e:
-                logger.error(f"  ERROR running {method.value} on goal '{goal[:50]}': {e}")
                 import traceback
-                logger.debug(traceback.format_exc())
+                tb = traceback.format_exc()
+                logger.error(f"  ERROR running {method.value} on goal '{goal[:50]}': {e}")
+                logger.error(tb)
+                print(f"\n[ERROR] {method.value}: {e}\n{tb}")
 
     # ── Save summary ──
     summary_path = Path("data/summary.json")
